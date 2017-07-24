@@ -15,7 +15,7 @@ package main
 
 import (
 	"flag"
-	"html/template"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -23,35 +23,94 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 var (
 	socketPath = flag.String("sock", "", "FastCGI socket.")
+	listen     = flag.String("listen", ":8081", "Address to listen to.")
 	root       = flag.String("root", "/upload", "Path relative to root.")
+	out        = flag.String("out", ".", "Output directory.")
 
 	nameInvalid = regexp.MustCompile(`[^A-Za-z0-9._-]`)
-	tmplRoot    = template.Must(template.New("root").Parse(`
-<html>
-<form enctype="multipart/form-data" action="{{.}}upload" method="post">
-  <input type="file" name="file" accept="*/*" multiple />
-  <input type="submit" />
-</form>
-</html>
-`))
-
-	tmplUpload = template.Must(template.New("root").Parse(`
-<html>
-Upload complete!
-<a href="{{.}}">Back</a>
-</html>
-`))
+	upgrader    = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
 )
 
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	tmplRoot.Execute(w, prefix(*root))
+}
+
+func handleUploadWS(w http.ResponseWriter, req *http.Request) {
+	conn, err := upgrader.Upgrade(w, req, nil)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer conn.Close()
+
+	name := nameInvalid.ReplaceAllString(mux.Vars(req)["filename"], "_")
+	outName := filepath.Join(*out, name)
+	ok := false
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(outName); err != nil {
+			ok = true
+			break
+		}
+		outName = filepath.Join(*out, fmt.Sprintf("%d.%s", i, name))
+	}
+	if !ok {
+		log.Printf("Couldn't find a name for %q", name)
+		return
+	}
+	tmpName := outName + ".part"
+
+	log.Printf("Uploading %q using websockets (tmpf %q, out %q)...", name, tmpName, outName)
+
+	f, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
+	if err != nil {
+		log.Printf("Couldn't open %q", tmpName)
+		return
+	}
+	defer f.Close()
+	defer os.Remove(tmpName)
+
+	for {
+		_, p, err := conn.ReadMessage()
+		if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+			break
+		}
+		if err != nil {
+			log.Printf("Reading: %v", err)
+			return
+		}
+		log.Printf("Data received; %d bytes", len(p))
+		if n, err := f.Write(p); err != nil {
+			log.Printf("Writing: %v", err)
+			return
+		} else if n < len(p) {
+			log.Printf("Short write: %v", err)
+			return
+		}
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("Closing: %v", err)
+		return
+	}
+	if err := os.Rename(tmpName, outName); err != nil {
+		log.Printf("Rename: %v", err)
+		return
+	}
+	log.Printf("Done uploading...")
 }
 
 func handleUpload(w http.ResponseWriter, req *http.Request) {
@@ -102,22 +161,42 @@ func prefix(r string) string {
 	return r + "/"
 }
 
+func notFound(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotFound)
+	fmt.Fprintf(w, "404 bitch for path %q\n", r.URL)
+}
+
 func main() {
 	flag.Parse()
 	m := mux.NewRouter()
+	m.NotFoundHandler = http.HandlerFunc(notFound)
+
 	s := m.PathPrefix(prefix(*root)).Subrouter()
 	s.Methods("GET").Subrouter().HandleFunc("/", handleRoot)
 	s.Methods("POST").Subrouter().HandleFunc("/upload", handleUpload)
+	s.HandleFunc("/upload-ws/{filename}", handleUploadWS)
 
-	os.Remove(*socketPath)
-	sock, err := net.Listen("unix", *socketPath)
-	if err != nil {
-		log.Fatalf("Unable to listen to socket: %v", err)
-	}
-	if err := os.Chmod(*socketPath, 0666); err != nil {
-		log.Fatal("Unable to chmod socket: ", err)
+	if *socketPath != "" {
+		os.Remove(*socketPath)
+		sock, err := net.Listen("unix", *socketPath)
+		if err != nil {
+			log.Fatalf("Unable to listen to socket %q: %v", *socketPath, err)
+		}
+		if err := os.Chmod(*socketPath, 0666); err != nil {
+			log.Fatal("Unable to chmod socket: ", err)
+		}
+		log.Printf("Running")
+		log.Fatal(fcgi.Serve(sock, m))
+	} else {
+		s := &http.Server{
+			Addr:           *listen,
+			Handler:        m,
+			ReadTimeout:    10 * time.Second,
+			WriteTimeout:   10 * time.Second,
+			MaxHeaderBytes: 1 << 20,
+		}
+		log.Printf("Running")
+		log.Fatal(s.ListenAndServe())
 	}
 
-	log.Printf("Running")
-	log.Fatal(fcgi.Serve(sock, m))
 }
