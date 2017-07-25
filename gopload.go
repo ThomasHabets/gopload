@@ -53,61 +53,72 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 func handleUploadWS(w http.ResponseWriter, req *http.Request) {
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {
-		log.Println(err)
+		log.Printf("Failed to upgrade to websocket: %v", err)
+		http.Error(w, "Failed to upgrade to websocket", http.StatusBadRequest)
 		return
 	}
 	defer conn.Close()
-
-	name := nameInvalid.ReplaceAllString(mux.Vars(req)["filename"], "_")
-	outName := filepath.Join(*out, name)
-	ok := false
-	for i := 0; i < 100; i++ {
-		if _, err := os.Stat(outName); err != nil {
-			ok = true
-			break
+	if err := func() error {
+		name := nameInvalid.ReplaceAllString(mux.Vars(req)["filename"], "_")
+		outName := filepath.Join(*out, name)
+		ok := false
+		for i := 0; i < 100; i++ {
+			if _, err := os.Stat(outName); err != nil {
+				ok = true
+				break
+			}
+			outName = filepath.Join(*out, fmt.Sprintf("%d.%s", i, name))
 		}
-		outName = filepath.Join(*out, fmt.Sprintf("%d.%s", i, name))
-	}
-	if !ok {
-		log.Printf("Couldn't find a name for %q", name)
-		return
-	}
-	tmpName := outName + ".part"
-
-	log.Printf("Uploading %q using websockets (tmpf %q, out %q)...", name, tmpName, outName)
-
-	f, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
-	if err != nil {
-		log.Printf("Couldn't open %q", tmpName)
-		return
-	}
-	defer f.Close()
-	defer os.Remove(tmpName)
-
-	for {
-		_, p, err := conn.ReadMessage()
-		if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-			break
+		if !ok {
+			return fmt.Errorf("couldn't find a name for %q", name)
 		}
+		tmpName := outName + ".part"
+
+		log.Printf("Uploading %q using websockets (tmpf %q, out %q)...", name, tmpName, outName)
+
+		f, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
 		if err != nil {
-			log.Printf("Reading: %v", err)
-			return
+			log.Printf("Couldn't open %q: %v", tmpName, err)
+			return fmt.Errorf("couldn't open tempfile")
 		}
-		log.Printf("Data received; %d bytes", len(p))
-		if n, err := f.Write(p); err != nil {
-			log.Printf("Writing: %v", err)
-			return
-		} else if n < len(p) {
-			log.Printf("Short write: %v", err)
-			return
+		defer f.Close()
+		defer os.Remove(tmpName)
+
+		written := 0
+		for {
+			mt, p, err := conn.ReadMessage()
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				break
+			}
+			if mt != websocket.BinaryMessage {
+				return fmt.Errorf("non-binary message received")
+			}
+			if err != nil {
+				return fmt.Errorf("server receiving data: %v", err)
+			}
+			// log.Printf("Data received; %d bytes", len(p))
+			if n, err := f.Write(p); err != nil {
+				return fmt.Errorf("writing to file: %v", err)
+			} else if n < len(p) {
+				return fmt.Errorf("short write to file: %v", err)
+			}
+			written += len(p)
+			if err := conn.WriteJSON(&struct{ Written int }{Written: written}); err != nil {
+				log.Printf("Failed to send status message: %v", err)
+			}
 		}
-	}
-	if err := f.Close(); err != nil {
-		log.Printf("Closing: %v", err)
-		return
-	}
-	if err := os.Rename(tmpName, outName); err != nil {
-		log.Printf("Rename: %v", err)
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("closing file: %v", err)
+		}
+		if err := os.Rename(tmpName, outName); err != nil {
+			return fmt.Errorf("rename temp file to final file: %v", err)
+		}
+		return nil
+	}(); err != nil {
+		log.Printf("Upload failed: %v", err)
+		if err := conn.WriteJSON(&struct{ Error string }{Error: err.Error()}); err != nil {
+			log.Printf("Failed to send error message: %v", err)
+		}
 		return
 	}
 	log.Printf("Done uploading...")
