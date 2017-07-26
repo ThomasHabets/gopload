@@ -4,13 +4,35 @@ import "html/template"
 
 var tmplRoot = template.Must(template.New("root").Parse(`
 <html>
+<style>
+progress {
+  width: 100%;
+}
+td.status {
+  width: 30%;
+  text-align: right;
+}
+th.name {
+  width: 30%;
+}
+#filetable {
+  border: 1px solid black;
+  margin-top: 1em;
+  margin-bottom: 1em;
+  width: 100%;
+/*  display: none; */
+}
+#filetable th {
+  border-bottom: 1px solid black;
+}
+</style>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
 <script>
 var chunk_size = 100000;
 
-function status(s) {
-  console.log(s);
-  var o = document.getElementById("status");
-  o.innerText = s;
+function status(n, s) {
+  console.log("File " + n + ": " + s);
+  $("#status-"+n).text(s);
 }
 
 function upload_part(f, ws, offset)
@@ -37,10 +59,12 @@ function upload_part(f, ws, offset)
   reader.readAsArrayBuffer(s);
 }
 
-function upload(event)
-{
-  var fs = document.getElementById("files");
-  var f = fs.files[0];
+function upload_files(files, n) {
+  if (files.length == n) {
+    console.log("All uploads done");
+    return;
+  }
+  var f = files[n];
   var error_set = false;
   console.log(f);
   ws = new WebSocket("wss://"+window.location.host+"{{.}}upload-ws/" + f.name);
@@ -56,45 +80,62 @@ function upload(event)
   ws.onclose = function(ev) {
     if (ev.code != 1000) {
       if (!error_set) {
-        status("Upload failed.");
+        status(n, "Upload failed.");
       }
       console.log(ev);
     } else {
-      status("Upload done");
-      document.getElementById("progress").value = 100;
+      status(n, "Uploaded " + f.size + " bytes");
+      document.getElementById("progress-"+n).value = 100;
     }
+    upload_files(files, n+1);
   }
   ws.onmessage = function(ev) {
     var o = JSON.parse(ev.data);
     if (o.Error !== undefined) {
-      status("Upload failed: " + o.Error);
+      status(n, "Upload failed: " + o.Error);
       error_set = true;
     }
     if (o.Written !== undefined) {
       var p = 100.0*o.Written/f.size;
-      status("Sent " + o.Written + " of " + f.size + " " + Math.round(p) + "%");
-      document.getElementById("progress").value = p;
+      status(n, "Sent " + o.Written + " of " + f.size + " " + Math.round(p) + "%");
+      document.getElementById("progress-" + n).value = p;
       if (o.Written == f.size) {
         ws.close(1000)
       }
     }
   }
 }
+
+function upload(event)
+{
+  console.log("Uploading...");
+  var fs = document.getElementById("files").files;
+  var i;
+  var o = $("#filetable");
+  for (i = 0; i < fs.length; i++) {
+    console.log("Adding file: " + fs[i].name);
+    var $tr = $("<tr></tr>");
+
+    $("<td></td>", {class:"name"}).text(fs[i].name).appendTo($tr);
+    $("<td></td>", {id: "status-"+i, "class": "status"}).text("IDLE").appendTo($tr);
+    $("<progress></progress>", {id: "progress-"+i, "value": "0"}).appendTo($("<td></td>").appendTo($tr));
+
+    o.append($tr);
+  }
+  $("#filetable").css("display", "block");
+  $("input,button").prop("disabled", true);
+  upload_files(fs, 0);
+}
+
 </script>
-<table style="width: 100%">
+<input id="files" type="file" name="file" accept="*/*" multiple />
+<button onclick="upload()">Upload</button>
+<table id="filetable">
   <tr>
-<!--    <th>File</th> -->
+    <th>File</th>
     <th>Status</th>
     <th>Progress</th>
   </tr>
-  <tr>
-<!--    <td>TODO</td> -->
-    <td style="width: 30%; text-align: right;" id="status">IDLE</td>
-    <td><progress style="width: 100%" id="progress" value="0" max="100" /></td>
-  </tr>
 </table>
-<input id="files" type="file" name="file" accept="*/*" />
-<input type="submit" onclick="upload()" />
-</form>
 </html>
 `))
