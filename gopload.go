@@ -179,6 +179,15 @@ func notFound(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	flag.Parse()
+
+	if (*socketPath == "") == (*listen == "") {
+		log.Fatalf("Must provide exactly one of -sock and -listen")
+	}
+
+	if flag.NArg() > 0 {
+		log.Fatalf("Extra args on command line: %q", flag.Args())
+	}
+
 	m := mux.NewRouter()
 	m.NotFoundHandler = http.HandlerFunc(notFound)
 
