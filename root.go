@@ -4,6 +4,9 @@ import "html/template"
 
 var tmplRoot = template.Must(template.New("root").Parse(`
 <html>
+<head>
+<title>Gopload</title>
+</head>
 <style>
 progress {
   width: 100%;
@@ -118,7 +121,7 @@ function upload(event)
 
     $("<td></td>", {class:"name"}).text(fs[i].name).appendTo($tr);
     $("<td></td>", {id: "status-"+i, "class": "status"}).text("IDLE").appendTo($tr);
-    $("<progress></progress>", {id: "progress-"+i, "value": "0"}).appendTo($("<td></td>").appendTo($tr));
+    $("<progress></progress>", {id: "progress-"+i, "max": "100", "value": "0"}).appendTo($("<td></td>").appendTo($tr));
 
     o.append($tr);
   }
