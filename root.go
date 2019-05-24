@@ -28,6 +28,9 @@ th.name {
 #filetable th {
   border-bottom: 1px solid black;
 }
+.max-width {
+  width: 100%;
+}
 </style>
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
 <script>
@@ -137,7 +140,7 @@ function upload(event)
   <tr>
     <th>File</th>
     <th>Status</th>
-    <th>Progress</th>
+    <th class="max-width">Progress</th>
   </tr>
 </table>
 </html>
